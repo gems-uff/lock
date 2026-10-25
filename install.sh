@@ -19,7 +19,7 @@ UNIT=/etc/systemd/system/lock-cleanup.service
 SSHD_CONFIG=${SSHD_CONFIG:-/etc/ssh/sshd_config}
 SSHD_DROPIN_DIR=/etc/ssh/sshd_config.d
 
-ADMINS="" MODE=install DRY_RUN=0 FORCE=0 PURGE=0
+ADMINS="" MODE=install DRY_RUN=0 FORCE=0 PURGE=0 SUDOERS_WAS_VALID=1
 
 say() { echo "install.sh: $*"; }
 die() { echo "install.sh: ERROR: $*" >&2; exit 1; }
@@ -78,6 +78,12 @@ preflight() {
         if [ "$FORCE" = 1 ]; then say "continuing because of --force"; else ok=0; fi
     fi
     [ -d "$MOTD_DIR" ] || say "warning: $MOTD_DIR not found; the login message (motd) will not show reservations"
+    # a sudoers configuration that is already broken is not ours to fix, but then only lock's own rule is validated
+    if command -v visudo >/dev/null 2>&1 && ! visudo -c >/dev/null 2>&1; then
+        SUDOERS_WAS_VALID=0
+        say "warning: 'visudo -c' already fails before installing; lock will validate only its own rule:"
+        visudo -c 2>&1 | grep -v 'parsed OK' | sed 's/^/    /' || true
+    fi
     [ "$ok" = 1 ] || die "preflight failed; nothing was changed"
     say "preflight ok"
 }
@@ -113,7 +119,8 @@ do_install() {
     run systemctl daemon-reload
     run systemctl enable --quiet lock-cleanup.service
     if [ "$DRY_RUN" = 0 ]; then
-        visudo -c >/dev/null || die "visudo -c failed after the install; check $SUDOERS"
+        visudo -c -f "$SUDOERS" >/dev/null || die "visudo rejected $SUDOERS after the install"
+        if [ "$SUDOERS_WAS_VALID" = 1 ]; then visudo -c >/dev/null || die "visudo -c failed after the install; check $SUDOERS"; fi
         say "installed $("$BIN" --version); administrators: $(sed -n 's/^ADMINS="\(.*\)"/\1/p' "$CONF")"
         "$BIN" status
     fi
