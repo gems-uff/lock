@@ -20,8 +20,9 @@ brt() { TZ=America/Sao_Paulo gdate "$@"; }
 as() { local u=$1; shift; sudo -u "$u" -- "$@"; }
 ssh_as() {
     local u=$1; shift
+    # default LogLevel (INFO): the client prints the server's banner only at INFO or above
     ssh -i "$K/$u" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-        -o LogLevel=ERROR -o ConnectTimeout=10 "$u@127.0.0.1" "$@"
+        -o ConnectTimeout=10 "$u@127.0.0.1" "$@"
 }
 login_ok() { ssh_as "$1" true 2>"$K/err"; }
 login_refused_with_banner() { ! ssh_as "$1" true 2>"$K/err" && grep -q "está medindo tempo" "$K/err"; }
