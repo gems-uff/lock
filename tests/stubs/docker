@@ -1,0 +1,15 @@
+#!/bin/bash
+# test double for docker: records the call in $LOCK_TEST_ROOT/calls.log
+echo "docker $*" >> "$LOCK_TEST_ROOT/calls.log"
+S=$LOCK_TEST_ROOT/stub
+case "$1" in
+    info) [ -e "$S/docker_up" ] ;;
+    ps) cat "$S/docker_ps" 2>/dev/null ;;
+    inspect)
+        id=${*: -1}
+        case "$*" in
+            *Labels*) cat "$S/docker_label_$id" 2>/dev/null; echo ;;
+            *.Name*) echo "/ctr-$id" ;;
+        esac ;;
+    *) exit 2 ;;
+esac

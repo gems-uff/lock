@@ -1,0 +1,5 @@
+#!/bin/bash
+# test double for getent: records the call in $LOCK_TEST_ROOT/calls.log
+echo "getent $*" >> "$LOCK_TEST_ROOT/calls.log"
+[ "$1" = passwd ] || exit 2
+grep "^$2:" "$LOCK_TEST_ROOT/etc/passwd" || exit 2

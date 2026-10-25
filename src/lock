@@ -1,0 +1,239 @@
+#!/bin/bash
+# lock: exclusive machine reservation for people who measure running time on shared Linux servers.
+#
+#   sudo lock start --until "YYYY-MM-DD HH:MM"   reserve the machine for the caller until the given time
+#   sudo lock stop                               end the reservation (owner or administrator; idempotent)
+#   lock status                                  show whether there is a reservation, whose, and until when
+#
+# start refuses if a reservation is active, or if other users are using CPU above CPU_LIMIT (sampled for 2 s),
+# have processes on the GPU, or have running Docker containers; it never kills anything. While the reservation
+# holds, sshd accepts new logins only from ADMINS (/etc/lock.conf) and the owner, and shows a banner to everyone
+# else; sessions already open keep running. A systemd timer ends the reservation at the given time, and
+# lock-cleanup.service ends any reservation at boot. User-facing messages are in Portuguese (pt-BR).
+#
+# https://github.com/gems-uff/lock (MIT License)
+set -u
+
+VERSION=1.0.0
+
+# Test hook: LOCK_TEST_ROOT moves every file this script touches into a sandbox and LOCK_TEST_UID fakes the
+# caller's uid. Both are ignored when the script really runs as root, so they cannot redirect a real reservation.
+if [ -n "${LOCK_TEST_ROOT:-}" ] && [ "$EUID" -ne 0 ]; then
+    ROOT=$LOCK_TEST_ROOT; MY_UID=${LOCK_TEST_UID:-$EUID}
+else
+    ROOT=; MY_UID=$EUID
+fi
+
+CONF=$ROOT/etc/lock.conf
+STATE=$ROOT/etc/lock.state                # "login|end_epoch|Full name"
+DROPIN=$ROOT/etc/ssh/sshd_config.d/00-lock.conf
+BANNER=$ROOT/etc/lock.banner
+MUTEX=$ROOT/run/lock-cmd.lock             # serializes start/stop
+PROC=$ROOT/proc
+CRONTABS=$ROOT/var/spool/cron/crontabs
+SELF=/usr/local/bin/lock                  # what the timer runs
+TIMER=lock-stop                           # transient unit created by systemd-run
+
+# Defaults; /etc/lock.conf overrides them.
+ADMINS=""
+CPU_LIMIT=10                              # % of one core (sum over processes) of other users that blocks start
+MAX_DAYS=14                               # longer reservations are treated as typos
+TIMEZONE=America/Sao_Paulo                # --until is read and shown in this zone, whatever the machine's zone
+TIMEZONE_LABEL="hora de Brasília"
+# shellcheck source=etc/lock.conf
+[ -r "$CONF" ] && . "$CONF"
+
+DATE="date"                               # Ubuntu 26.04 ships uutils date; GNU date stays available as gnudate
+command -v gnudate >/dev/null 2>&1 && DATE=gnudate
+
+die() { echo "lock: $*" >&2; exit 1; }
+when() { TZ=$TIMEZONE $DATE -d "@$1" '+%d/%m/%Y %H:%M'; }
+full_name() { local n; n=$(getent passwd "$1" | cut -d: -f5 | cut -d, -f1); echo "${n:-$1}"; }
+is_admin() { case " $ADMINS " in *" $1 "*) return 0 ;; esac; return 1; }
+allowed() { if is_admin "$1"; then echo "$ADMINS"; else echo "${ADMINS:+$ADMINS }$1"; fi; }
+need_root() { [ "$MY_UID" = 0 ] || die "rode com sudo: sudo lock $*"; }
+serialize() { exec 9>"$MUTEX"; flock -n 9 || die "outro lock start/stop está em andamento; tente de novo"; }
+reload_ssh() {
+    sshd -t || return 1
+    systemctl try-reload-or-restart ssh.service 2>/dev/null || systemctl try-reload-or-restart sshd.service 2>/dev/null
+    return 0
+}
+
+# "pid ticks" for every process (utime+stime of all threads, in clock ticks)
+ticks() {
+    local p l
+    for p in "$PROC"/[0-9]*; do
+        { read -r l < "$p/stat"; } 2>/dev/null || continue
+        l=${l##*) }                       # drop "pid (comm) "; comm may contain spaces
+        # shellcheck disable=SC2086
+        set -- $l
+        echo "${p##*/} $(( ${12} + ${13} ))"
+    done
+}
+
+# CPU use of other users (uid >= 1000, except $1) sampled over 2 s: "total user=N% ..." (% of one core).
+# ps pcpu is a lifetime average, useless to tell whether someone is computing right now.
+cpu_others() {
+    local a b
+    a=$(ticks); sleep 2; b=$(ticks)
+    ps -eo pid=,uid=,user:32= | A="$a" B="$b" awk -v hz="$(getconf CLK_TCK)" -v owner="$1" '
+        BEGIN {
+            n = split(ENVIRON["A"], l, "\n"); for (i = 1; i <= n; i++) { split(l[i], c, " "); t0[c[1]] = c[2] }
+            n = split(ENVIRON["B"], l, "\n"); for (i = 1; i <= n; i++) { split(l[i], c, " "); t1[c[1]] = c[2] }
+            f = 100 / (hz * 2)
+        }
+        $2 >= 1000 && $3 != owner && ($1 in t1) { d = t1[$1] - (($1 in t0) ? t0[$1] : 0); s += d; u[$3] += d }
+        END { printf "%.0f", s * f; for (k in u) if (u[k] * f >= 1) printf " %s=%.0f%%", k, u[k] * f; print "" }'
+}
+
+# logins with open sessions, except $1 (logind: Ubuntu 26.04 has no utmp, and uutils who sees nobody)
+sessions_others() {
+    loginctl list-sessions --no-legend 2>/dev/null | awk -v o="$1" '$3 != o {print $3}' | sort -u | tr '\n' ' '
+}
+
+cmd_status() {
+    local owner end name
+    if [ -r "$STATE" ]; then
+        IFS='|' read -r owner end name < "$STATE"
+        echo "Reserva ativa em $(hostname): $name ($owner) está medindo tempo até $(when "$end") ($TIMEZONE_LABEL)."
+        echo "Logins por ssh só para: $(allowed "$owner"). Em caso de urgência, fale com $name."
+        if [ "$MY_UID" = 0 ] && [ -t 1 ]; then
+            systemctl list-timers "$TIMER.timer" --no-pager --no-legend 2>/dev/null | sed 's/^/  timer: /'
+        fi
+    else
+        echo "Nenhuma reserva ativa em $(hostname)."
+    fi
+}
+
+cmd_start() {
+    need_root start "$@"
+    local until="" owner name now end
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --until) [ $# -ge 2 ] || die "--until precisa de um valor"; until="$2"; shift 2 ;;
+            --until=*) until="${1#--until=}"; shift ;;
+            *) die "argumento desconhecido: $1 (uso: sudo lock start --until \"AAAA-MM-DD HH:MM\")" ;;
+        esac
+    done
+    [ -n "$until" ] || die "uso: sudo lock start --until \"AAAA-MM-DD HH:MM\" ($TIMEZONE_LABEL)"
+    [[ "$until" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2}$ ]] \
+        || die "não entendi a hora \"$until\"; use AAAA-MM-DD HH:MM"
+    serialize
+    owner="${SUDO_USER:-root}"; name=$(full_name "$owner")
+    now=$($DATE +%s)
+    end=$(TZ=$TIMEZONE $DATE -d "$until" +%s 2>/dev/null) || die "não entendi a hora \"$until\"; use AAAA-MM-DD HH:MM"
+    [ "$end" -gt $((now + 60)) ] || die "o fim ($(when "$end")) já passou ou é daqui a menos de 1 min"
+    [ "$end" -le $((now + MAX_DAYS * 86400)) ] || die "reserva de mais de $MAX_DAYS dias; confira a data"
+
+    # 1. checks: report, never kill
+    local failed=0 notes="" others d f n
+    if [ -r "$STATE" ]; then
+        IFS='|' read -r d f n < "$STATE"
+        echo "Já há reserva ativa: $n ($d) até $(when "$f") ($TIMEZONE_LABEL)." >&2; failed=1
+    fi
+    local cpu
+    cpu=$(cpu_others "$owner")
+    if [ "${cpu%% *}" -ge "$CPU_LIMIT" ]; then
+        echo "Outros usuários estão usando CPU agora (${cpu%% *}% de um núcleo: ${cpu#* }); fale com eles antes de medir." >&2
+        failed=1
+    fi
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        local gpu="" pid u
+        for pid in $(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null); do
+            u=$(ps -o user= -p "$pid" 2>/dev/null); [ -n "$u" ] && [ "$u" != "$owner" ] && gpu="$gpu $u(pid $pid)"
+        done
+        if [ -n "$gpu" ]; then echo "Há processos de outros na GPU:$gpu." >&2; failed=1; fi
+    fi
+    # running Docker containers (owner guessed from the compose working dir or the bind mounts)
+    if command -v docker >/dev/null 2>&1 && timeout 20 docker info >/dev/null 2>&1; then
+        local cont="" c lbl own
+        for c in $(docker ps -q 2>/dev/null); do
+            lbl=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project.working_dir"}} {{.HostConfig.Binds}}' "$c" 2>/dev/null)
+            own=$(echo "$lbl" | grep -oE '/(home|nvme|data|scratch)/[^/ :]+' | head -1 | awk -F/ '{print $3}')
+            [ "${own:-?}" = "$owner" ] || cont="$cont $(docker inspect --format '{{.Name}}' "$c" | sed 's|^/||')(${own:-dono desconhecido})"
+        done
+        if [ -n "$cont" ]; then echo "Há contêineres Docker de outros rodando:$cont. Peça ao dono para parar." >&2; failed=1; fi
+    fi
+    others=$(sessions_others "$owner")
+    if [ "$failed" != 0 ]; then
+        echo "Carga: $(cut -d' ' -f1-3 "$PROC/loadavg" 2>/dev/null); sessões abertas de outros: ${others:-nenhuma}" >&2
+        die "reserva NÃO feita."
+    fi
+    # warnings only: open sessions and other users' crontabs (blocking ssh does not cover them)
+    [ -n "$others" ] && notes="$notes\n  - sessões abertas de: $others(continuam abertas; o bloqueio vale só para logins novos)"
+    others=""
+    for f in "$CRONTABS"/*; do
+        [ -e "$f" ] || continue
+        case "${f##*/}" in root|"$owner") ;; *) others="$others${f##*/} " ;; esac
+    done
+    [ -n "$others" ] && notes="$notes\n  - crontabs de: $others(continuam rodando)"
+
+    # 2. logins: AllowUsers applies to new logins; whoever is already in stays
+    printf '%s está medindo tempo em %s até %s (%s), conforme a agenda da máquina.\nEm caso de urgência, fale com %s.\n' \
+        "$name" "$(hostname)" "$(when "$end")" "$TIMEZONE_LABEL" "$name" > "$BANNER"
+    printf '# written by lock start at %s; removed by lock stop\nAllowUsers %s\nBanner %s\n' \
+        "$($DATE '+%F %T')" "$(allowed "$owner")" "$BANNER" > "$DROPIN"
+    if ! reload_ssh; then rm -f "$DROPIN" "$BANNER"; reload_ssh; die "o sshd recusou a configuração; nada foi aplicado."; fi
+    echo "$owner|$end|$name" > "$STATE"     # /etc/update-motd.d/05-lock shows the reservation while this file exists
+
+    # 4. guaranteed undo: a timer at the end time (lock-cleanup.service covers reboots)
+    systemctl stop "$TIMER.timer" 2>/dev/null; systemctl reset-failed "$TIMER.service" "$TIMER.timer" 2>/dev/null
+    systemd-run --quiet --unit="$TIMER" --description="lock: fim da reserva de $owner" --timer-property=AccuracySec=1s \
+        --on-calendar="$(TZ=UTC $DATE -d "@$end" '+%Y-%m-%d %H:%M:%S') UTC" "$SELF" stop --timer \
+        || echo "lock: AVISO: não consegui agendar o fim automático; rode 'sudo lock stop' ao terminar." >&2
+
+    # 3. notice
+    wall "$(cat "$BANNER")" 2>/dev/null
+    echo "Reserva feita: $name ($owner) até $(when "$end") ($TIMEZONE_LABEL). Logins novos só para: $(allowed "$owner")."
+    [ -n "$notes" ] && printf 'Atenção:%b\n' "$notes"
+    return 0
+}
+
+cmd_stop() {
+    need_root stop
+    local mode="${1:-}" had=0 owner="" name=""
+    case "$mode" in
+        "") ;;
+        --timer|--boot) [ -z "${SUDO_USER:-}" ] || die "$mode é só para o systemd" ;;
+        *) die "uso: sudo lock stop" ;;
+    esac
+    serialize
+    if [ -r "$STATE" ]; then had=1; IFS='|' read -r owner _ name < "$STATE"; fi
+    if [ "$had" = 1 ] && [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "$owner" ] && ! is_admin "$SUDO_USER"; then
+        die "a reserva é de $name ($owner); só quem reservou ou um administrador ($ADMINS) pode encerrá-la."
+    fi
+    rm -f "$DROPIN" "$BANNER" "$STATE"
+    # at boot sshd has not started yet (the cleanup unit runs before it) and reads the clean config; reloading
+    # from there could deadlock on the queued ssh start job
+    if [ "$mode" != --boot ]; then
+        reload_ssh || echo "lock: AVISO: sshd -t falhou depois de remover o drop-in; confira /etc/ssh/sshd_config" >&2
+    fi
+    if [ "$mode" != --timer ]; then
+        systemctl stop "$TIMER.timer" 2>/dev/null; systemctl reset-failed "$TIMER.service" "$TIMER.timer" 2>/dev/null
+    fi
+    if [ "$had" = 1 ]; then
+        [ "$mode" != --boot ] && wall "A reserva de $name ($owner) em $(hostname) terminou; logins liberados." 2>/dev/null
+        echo "Reserva de $name ($owner) encerrada; logins liberados."
+    else
+        [ "$mode" = --boot ] || echo "Nenhuma reserva ativa (nada a desfazer)."
+    fi
+    return 0
+}
+
+usage() {
+    cat <<EOF
+uso: sudo lock start --until "AAAA-MM-DD HH:MM"   reserva a máquina até a hora dada ($TIMEZONE_LABEL)
+     sudo lock stop                               encerra a reserva (quem reservou ou um administrador)
+     lock status                                  mostra a reserva ativa
+     lock --version
+EOF
+}
+
+case "${1:-}" in
+    start)  shift; cmd_start "$@" ;;
+    stop)   shift; cmd_stop "$@" ;;
+    status) cmd_status ;;
+    --version|version) echo "lock $VERSION" ;;
+    -h|--help|help) usage ;;
+    *) usage >&2; exit 2 ;;
+esac

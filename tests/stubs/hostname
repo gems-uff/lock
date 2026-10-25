@@ -1,0 +1,4 @@
+#!/bin/bash
+# test double for hostname: records the call in $LOCK_TEST_ROOT/calls.log
+echo "hostname $*" >> "$LOCK_TEST_ROOT/calls.log"
+echo testhost

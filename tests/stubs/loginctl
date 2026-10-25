@@ -1,0 +1,5 @@
+#!/bin/bash
+# test double for loginctl: records the call in $LOCK_TEST_ROOT/calls.log
+echo "loginctl $*" >> "$LOCK_TEST_ROOT/calls.log"
+S=$LOCK_TEST_ROOT/stub
+cat "$S/sessions" 2>/dev/null; exit 0

@@ -1,0 +1,9 @@
+#!/bin/bash
+# test double for ps: records the call in $LOCK_TEST_ROOT/calls.log
+echo "ps $*" >> "$LOCK_TEST_ROOT/calls.log"
+S=$LOCK_TEST_ROOT/stub
+case "$*" in
+    "-eo pid=,uid=,user:32=") cat "$S/ps" ;;
+    "-o user= -p "*) awk -v p="$4" '$1 == p {print $3}' "$S/ps" ;;
+    *) echo "ps stub: unexpected arguments: $*" >&2; exit 2 ;;
+esac

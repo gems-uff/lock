@@ -1,0 +1,14 @@
+# /etc/systemd/system/lock-cleanup.service: no lock reservation survives a reboot.
+# Runs before sshd, which then starts without the AllowUsers drop-in.
+[Unit]
+Description=lock: end any time-measurement reservation at boot
+Documentation=https://github.com/gems-uff/lock
+After=local-fs.target
+Before=ssh.service sshd.service systemd-user-sessions.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/lock stop --boot
+
+[Install]
+WantedBy=multi-user.target

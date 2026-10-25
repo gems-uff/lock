@@ -1,0 +1,4 @@
+#!/bin/bash
+# test double for wall: records the call in $LOCK_TEST_ROOT/calls.log
+echo "wall $*" >> "$LOCK_TEST_ROOT/calls.log"
+exit 0

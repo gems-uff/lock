@@ -1,0 +1,4 @@
+#!/bin/bash
+# test double for systemctl: records the call in $LOCK_TEST_ROOT/calls.log
+echo "systemctl $*" >> "$LOCK_TEST_ROOT/calls.log"
+exit 0

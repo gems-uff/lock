@@ -1,0 +1,5 @@
+#!/bin/bash
+# test double for nvidia-smi: records the call in $LOCK_TEST_ROOT/calls.log
+echo "nvidia-smi $*" >> "$LOCK_TEST_ROOT/calls.log"
+S=$LOCK_TEST_ROOT/stub
+cat "$S/gpu_pids" 2>/dev/null; exit 0

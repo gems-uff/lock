@@ -1,0 +1,7 @@
+#!/bin/bash
+# test double for sleep: records the call in $LOCK_TEST_ROOT/calls.log
+echo "sleep $*" >> "$LOCK_TEST_ROOT/calls.log"
+S=$LOCK_TEST_ROOT/stub
+# no real waiting; lets a test change /proc between the two CPU samples
+[ -x "$S/on_sleep" ] && "$S/on_sleep"
+exit 0

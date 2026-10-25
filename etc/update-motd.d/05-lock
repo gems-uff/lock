@@ -1,0 +1,7 @@
+#!/bin/sh
+# /etc/update-motd.d/05-lock (root:root 0755): shows the active lock reservation at login, if any.
+[ -r /etc/lock.state ] && [ -x /usr/local/bin/lock ] || exit 0
+echo
+echo "  *** MÁQUINA RESERVADA PARA MEDIÇÃO DE TEMPO ***"
+/usr/local/bin/lock status | sed 's/^/  /'
+exit 0

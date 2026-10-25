@@ -1,0 +1,5 @@
+#!/bin/bash
+# test double for systemd-run: records the call in $LOCK_TEST_ROOT/calls.log
+echo "systemd-run $*" >> "$LOCK_TEST_ROOT/calls.log"
+S=$LOCK_TEST_ROOT/stub
+exit "$(cat "$S/systemd_run_rc" 2>/dev/null || echo 0)"
