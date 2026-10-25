@@ -52,24 +52,26 @@ ok "first install requires --admins"
 if "$REPO/install.sh" --admins nosuchuser >/dev/null 2>&1; then fail "unknown admin accepted"; fi
 ok "unknown administrator rejected"
 "$REPO/install.sh" --admins ada
-"$REPO/install.sh" | grep -q "installed lock" || fail "reinstall"
+"$REPO/install.sh" | grep >/dev/null "installed lock" || fail "reinstall"
 grep -qx 'ADMINS="ada"' /etc/lock.conf || fail "reinstall must keep /etc/lock.conf"
 ok "install and idempotent reinstall"
+# the GitHub runner agent itself runs as uid 1001 and may use a few % of CPU; bob's busy loop is ~100 %
+sed -i 's/^CPU_LIMIT=.*/CPU_LIMIT=50/' /etc/lock.conf
 [ "$(stat -c %a /etc/sudoers.d/80-lock)" = 440 ] && visudo -c -f /etc/sudoers.d/80-lock >/dev/null || fail "sudoers"
 systemctl is-enabled --quiet lock-cleanup.service || fail "lock-cleanup.service not enabled"
-systemctl show -p Before lock-cleanup.service | grep -q ssh.service || fail "lock-cleanup must run before ssh.service"
+systemctl show -p Before lock-cleanup.service | grep >/dev/null ssh.service || fail "lock-cleanup must run before ssh.service"
 ok "sudoers valid, cleanup unit enabled and ordered before sshd"
 
 echo "# start, banner, motd, refusals, stop"
 end=$(brt -d "+10 min" '+%Y-%m-%d %H:%M')
-as alice sudo -n lock start --until "$end" | grep -q "Reserva feita: Full Alice (alice)" || fail "start by alice"
-lock status | grep -q "até $(brt -d "$end" '+%d/%m/%Y %H:%M') (hora de Brasília)" || fail "end time shown in BRT on a UTC machine"
+as alice sudo -n lock start --until "$end" | grep >/dev/null "Reserva feita: Full Alice (alice)" || fail "start by alice"
+lock status | grep >/dev/null "até $(brt -d "$end" '+%d/%m/%Y %H:%M') (hora de Brasília)" || fail "end time shown in BRT on a UTC machine"
 ok "regular user reserves through sudo; time read in BRT on a $(date +%Z) machine"
 login_refused_with_banner bob || { cat "$K/err"; fail "bob should be refused with the banner"; }
 ok "third party refused with banner"
 login_ok alice && login_ok ada || fail "owner and administrator must log in"
 ok "owner and administrator accepted"
-/etc/update-motd.d/05-lock | grep -q "MÁQUINA RESERVADA" || fail "motd"
+/etc/update-motd.d/05-lock | grep >/dev/null "MÁQUINA RESERVADA" || fail "motd"
 ok "motd shows the reservation"
 if as bob sudo -n lock stop 2>/dev/null; then fail "bob ended alice's reservation"; fi
 if as bob sudo -n lock stop --timer 2>/dev/null; then fail "bob used --timer"; fi
@@ -77,7 +79,7 @@ if as bob sudo -n lock stop --timer 2>/dev/null; then fail "bob used --timer"; f
 ok "third party cannot stop the reservation"
 if as bob sudo -n lock start --until "$end" 2>/dev/null; then fail "overlapping reservation accepted"; fi
 ok "overlapping reservation refused"
-as alice sudo -n lock stop | grep -q "encerrada" || fail "stop by owner"
+as alice sudo -n lock stop | grep >/dev/null "encerrada" || fail "stop by owner"
 sshd -T > "$K/sshd-after"
 diff "$K/sshd-before" "$K/sshd-after" || fail "sshd configuration differs after stop"
 login_ok bob || fail "bob after stop"
@@ -88,18 +90,17 @@ as alice sudo -n lock start --until "$end" >/dev/null
 as ada sudo -n lock stop >/dev/null && [ ! -e /etc/lock.state ] || fail "administrator stop"
 ok "administrator ends someone else's reservation"
 as bob timeout 60 bash -c 'while :; do :; done' &
-burner=$!
 sleep 3
 out=$(as alice sudo -n lock start --until "$end" 2>&1) && fail "start with bob using CPU"
-echo "$out" | grep -q "bob=" || fail "CPU report should name bob: $out"
-kill "$burner" 2>/dev/null || true; wait "$burner" 2>/dev/null || true
+echo "$out" | grep >/dev/null "bob=" || fail "CPU report should name bob: $out"
+pkill -u bob -f 'while :' || true; wait || true
 ok "CPU in use by another user blocks start"
 
 echo "# timer"
 now=$(date +%s)
 end=$(brt -d "@$(( (now / 60 + 3) * 60 ))" '+%Y-%m-%d %H:%M')     # a minute boundary 2-3 min away
 as alice sudo -n lock start --until "$end" >/dev/null || fail "start for the timer test"
-systemctl list-timers lock-stop.timer --no-legend | grep -q lock-stop || fail "timer not created"
+systemctl list-timers lock-stop.timer --no-legend | grep >/dev/null lock-stop || fail "timer not created"
 wait_until_gone /etc/lock.state 100 || fail "timer did not end the reservation"
 [ ! -e /etc/ssh/sshd_config.d/00-lock.conf ] && login_ok bob || fail "logins after the timer"
 ok "timer ends the reservation by itself"

@@ -127,7 +127,8 @@ do_install() {
 }
 
 do_uninstall() {
-    if [ -e /etc/lock.state ] && [ -x "$BIN" ]; then say "ending the active reservation first"; run "$BIN" stop; fi
+    # whoever runs the installer as root may end any reservation, even if not in ADMINS
+    if [ -e /etc/lock.state ] && [ -x "$BIN" ]; then say "ending the active reservation first"; run env -u SUDO_USER "$BIN" stop; fi
     if [ -e "$UNIT" ]; then run systemctl disable --quiet lock-cleanup.service; fi
     run rm -f "$BIN" "$SUDOERS" "$MOTD" "$UNIT"
     run systemctl daemon-reload
