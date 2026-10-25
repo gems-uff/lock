@@ -53,7 +53,7 @@ full name from the GECOS field. `--until` is always read in the configured time 
 
 ## Requirements
 
-- Linux with systemd (tested on Ubuntu 24.04 and 26.04).
+- Linux with systemd (Ubuntu 26.04 is the target; the end-to-end test also runs on Ubuntu 24.04).
 - OpenSSH with `Include /etc/ssh/sshd_config.d/*.conf` at the top of `sshd_config` (the default since Ubuntu
   20.04 and Debian 11), and no other `AllowUsers`, `AllowGroups`, `DenyUsers`, `DenyGroups`, `Banner` or `Match`.
 - bash, GNU date (on Ubuntu 26.04 the uutils `date` is the default; `lock` uses `gnudate` when it exists), sudo or
@@ -119,14 +119,14 @@ Keep at least one administrator: they can always log in to undo a reservation.
 ```sh
 make test          # unit tests with bats, in a sandbox (regular user; no root, no real sshd)
 make lint          # shellcheck
-make docker-test   # both, inside Ubuntu 26.04 (UBUNTU=24.04 for the older one)
+make docker-test   # both, inside an Ubuntu 26.04 container (UBUNTU=24.04 to try another release)
 ```
 
 The unit tests (`tests/unit`) run `src/lock` against a fake root (`LOCK_TEST_ROOT`) with fake `/etc`, `/proc` and
 `/run`, and with test doubles for `sshd`, `systemctl`, `systemd-run`, `docker`, `nvidia-smi`, `ps` and others
 (`tests/stubs`). The end-to-end test (`tests/integration/run.sh`, `make e2e`) installs `lock` on a disposable VM,
 creates users and keys, and checks real SSH logins, sudo, the timer, the boot cleanup and the uninstall. It refuses
-to run unless `LOCK_E2E=1`: **never run it on a real server.** CI runs everything on every push.
+to run unless `LOCK_E2E=1`: **never run it on a real server.** CI runs the unit tests on Ubuntu 26.04 and the end-to-end test on a 24.04 VM, on every push.
 
 ## License
 

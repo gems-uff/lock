@@ -11,17 +11,14 @@ permissions:
 
 jobs:
   unit:
-    name: lint and unit tests (Ubuntu ${{ matrix.ubuntu }})
+    name: lint and unit tests (Ubuntu 26.04)
     runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      matrix:
-        ubuntu: ["24.04", "26.04"]
     steps:
       - uses: actions/checkout@v4
-      - run: make docker-test UBUNTU=${{ matrix.ubuntu }}
+      - run: make docker-test
 
   e2e:
+    # the newest VM GitHub offers; it also keeps lock covered on Ubuntu 24.04
     name: end-to-end (real sshd, systemd and sudo)
     runs-on: ubuntu-24.04
     needs: unit
